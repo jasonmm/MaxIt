@@ -1,0 +1,1153 @@
+<!-- 
+Max-It
+(c) 2011 Shady Brook Software.
+Released under GPL v3
+http://www.gnu.org/licenses/gpl-3.0.txt
+ -->
+<HTML>
+<HEAD>
+<TITLE>MaxIt</TITLE>
+<META http-equiv="X-UA-Compatible" content="IE=8">
+<SCRIPT language="Javascript" type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/1.5.0/jquery.min.js"></SCRIPT>
+<SCRIPT language="Javascript" type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jqueryui/1.8.9/jquery-ui.min.js"></SCRIPT>
+<LINK href="http://ajax.googleapis.com/ajax/libs/jqueryui/1.8.9/themes/sunny/jquery-ui.css" type="text/css" rel="stylesheet">
+<SCRIPT language="Javascript" type="text/javascript">
+var gProgramName = "Max-It";
+var gProgramVersion = "1.3";
+var gProgramAuthor = "Shady Brook Software";
+var gProgramURL = "http://max-it.sf.net/";
+var gGameOptions = {
+	// Number of rows and columns in the game board.
+	rows: 10,
+	cols: 10,
+	// Default number of seconds to show a message.
+	showMessageLength: 30,
+	// Default maximum and minimum values that can appear on the game board.
+	maxValue: 15,
+	minValue: -15,
+	// Computer level.
+	computerLevel: 2,
+	// Opponent.
+	opponent: "computer",
+	// Whether or not to keep the win/loss record.
+	keepWL: "0"
+};
+var gDialogPosition = ["center", 20];
+// These will be two dimensional arrays that are row-major indexed 
+// (i.e. gGameBoard[row][col], not gGameBoard[col][row]).
+var gGameBoard = [];
+var gGameBoardVisited = [];
+// The overall state of the current game.
+var gGame = {
+	state: "",
+	selRow: -1,
+	selCol: -1,
+	gameOver: false
+};
+gCookieName = "SBSMaxIt";
+
+jQuery.fn.center = function(type) {
+	if( !type ) {
+		type = "both";
+	}
+    this.css("position","absolute");
+	if( type == "vertical" || type == "both" ) {
+		this.css("top", ( $(window).height() - this.outerHeight() ) / 2+$(window).scrollTop() + "px");
+	}
+	if( type == "horizontal" || type == "both" ) {
+		this.css("left", ( $(window).width() - this.outerWidth() ) / 2+$(window).scrollLeft() + "px");
+	}
+    return this;
+};
+function Player(n, c) {
+	this.score = 0;
+	this.name = n;
+	this.isComputer = (c == null ? false : c);
+	this.lastMove = { };
+}
+function Point(x,y) {
+	this.x = x;
+	this.y = y;
+	this.toString = function() {
+		return(this.x+"_"+this.y);
+	};
+	this.fromString = function(str) {
+		var s = str.split("_");
+		this.x = parseInt(s[0]);
+		this.y = parseInt(s[1]);
+		return(this);
+	};
+}
+/**
+ * This class is used by the MinMax search.  It is the nodes of the search tree.
+ */
+function Node(p) {
+	// Reference to the parent node.
+	this.parent = p;
+	// A Point object telling what cell this node references.
+	this.cell = new Point(0,0);
+	// An array of choices the next player can make.
+	this.children = new Array(gGameOptions.rows);
+	// The value of this node.
+	this.value = -99;
+}
+
+
+var gPlayer1 = new Player(null);
+var gPlayer2 = new Player(null, true);
+var gMinMaxSearch = {
+	root: new Node(null),
+	humanScore: 0,
+	computerScore: 0,
+	// Indexed by gGameOptions.computerLevel (i.e. a level 3 computer will
+	// have a maximum search depth of 7).
+	maxSearchDepth: [ 1, 3, 5, 7, 9, 11, 13 ],
+	curSearchDepth: 0,
+	getMaxSearchDepth: function() {
+		if( gGameOptions.computerLevel >= this.maxSearchDepth.length ) {
+			gGameOptions.computerLevel = this.maxSearchDepth.length-1;
+		}
+		return( this.maxSearchDepth[gGameOptions.computerLevel] );
+	},
+	visited: []
+}
+
+function zeroPadNumbers(num, numDigits) {
+	if( numDigits == null ) {
+		numDigits = 2;
+	}
+	var powerOfTen = Math.pow(10, numDigits-1);
+	if( num < powerOfTen ) {
+		return(num);
+	}
+	var numZeros = (""+(num%powerOfTen)).length();
+	var zeros = "";
+	for( var i = 0; i < numZeros; i++ ) {
+		zeros += "0";
+	}
+	return( zeros+""+num );
+}
+function verifyBrowserSize() {
+	var winWidth = $(window).width();
+	var winHeight = $(window).height();
+	if( winWidth < 600 || winHeight < 400 ) {
+		throw "The browser window is too small.  The browser must be at least 800x600 to display MaxIt.";
+	}
+	return([winWidth, winHeight]);
+}
+function calculateGameBoardDigitFontSize(cellWidth) {
+	return( parseInt(cellWidth/3) );
+}
+function buildGameBoard() {
+	var browserSize = verifyBrowserSize();
+	var gbHTML = "";
+	var tableSize = Math.min(browserSize[0]*0.90, browserSize[1]-$("#divTitlebar").height()-$("#tableScoreboard").height()-35);
+	var cellWidth = parseInt(tableSize/gGameOptions.cols);
+	var fontSize = calculateGameBoardDigitFontSize(cellWidth);
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		gbHTML += "<TR id=\"trGameBoard"+j+"\">";
+		for( var i = 0; i < gGameOptions.cols; i++ ) {
+			var p = new Point(i,j);
+			gbHTML += "<TD id=\"tdGameBoard"+p.toString()+"\">"+i+"</TD>";
+		}
+		gbHTML += "</TR>";
+	}
+	$("#tableGameBoard").html(gbHTML);
+	$("TD[id^=tdGameBoard]")
+		.css("width", cellWidth)
+		.css("height", cellWidth)
+		.css("font-size", fontSize+"pt")
+	;
+}
+function fillGameBoard() {
+	var val = 0;
+	var rndMultiplier = gGameOptions.maxValue*2;
+	gGameBoard = [];
+	gGameBoardVisited = [];
+	// Create the grid.  Each cell can have a random number between
+	//  -15 and 14 (inclusive) except for a 0.  Cells cannot have 
+	//  a 0 value.
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		gGameBoard[j] = [];
+		gGameBoardVisited[j] = [];
+		for( var i = 0; i < gGameOptions.cols; i++ ) {
+			do {
+				val = Math.floor(Math.random()*(rndMultiplier))-gGameOptions.maxValue;
+			} while( val == 0 );
+			gGameBoard[j].push(val);
+			gGameBoardVisited[j].push(false);
+			var p = new Point(i,j);
+			var gbCellID = "tdGameBoard"+p.toString();
+			$("#"+gbCellID).html(val);
+		}
+	}
+}
+function updateScoreboard() {
+	$("#spanPlayer1Name").css("color", "black").html(gPlayer1.name);
+	$("#spanPlayer2Name").css("color", "black").html(gPlayer2.name);
+	$("#spanPlayer1Score").html(gPlayer1.score);
+	$("#spanPlayer2Score").html(gPlayer2.score);
+	if( gPlayer1.lastMove.value != null ) {
+//		$("#spanPlayer1LastMove").html(gPlayer1.lastMove.value+" @ "+gPlayer1.lastMove.coords.toString());
+	}
+	if( gPlayer2.lastMove.value != null ) {
+//		$("#spanPlayer2LastMove").html(gPlayer2.lastMove.value+" @ "+gPlayer2.lastMove.coords.toString());
+	}
+	// Set UI elements to denote which player's turn it is.
+	if( gGame.state == "player1turn" ) {
+		$("#spanPlayer1Name")
+			.css("color", "blue")
+			.html("* "+gPlayer1.name)
+		;
+	}
+	else if( gGame.state == "player2turn" ) {
+		$("#spanPlayer2Name")
+			.css("color", "blue")
+			.html("* "+gPlayer2.name)
+		;
+	}
+}
+function resetGameState() {
+	// Reset the game state.
+	gGame = {
+		state: "",
+		selRow: -1,
+		selCol: -1,
+		gameOver: false
+	};
+	// Reset the scores.
+	gPlayer1.score = gPlayer2.score = 0;
+}
+function setPlayerNames(p1, p2) {
+	// If the name is null then the player's name has not been set, so we set
+	// it for them.  If it is not null then it has already been set and we keep
+	// that name.
+	if( gPlayer1.name == null ) {
+		gPlayer1.name = p1;
+	}
+	if( gPlayer2.name == null ) {
+		gPlayer2.name = p2;
+	}
+}
+function newGame() {
+	try {
+		clearMsg();
+		resetGameState();
+		buildGameBoard();
+		fillGameBoard();
+		updateScoreboard();
+		// Set up the default names of the players.
+		switch( gGameOptions.opponent ) {
+		case "computer":
+			setPlayerNames("Human", "Computer");
+			break;
+		case "human":
+		case "remote_human":
+			setPlayerNames("Player 1", "Player 2");
+			// This is to make sure no players are marked as a computer.
+			gPlayer2.isComputer = gPlayer1.isComputer = false;
+			break;
+		}
+		// Set the state of the game to player 1's turn.
+		gGame.state = "player1turn";
+		// Start the game.
+		nextTurn();
+	} catch( err ) {
+		showMsg("Error creating new Game: "+err, "error", 10);
+	}
+}
+function resetBoardBackground() {
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		$("#trGameBoard"+j).css("background-color", "white");
+	}
+}
+function setBoardColors() {
+	var color = "";
+	for( var i = 0; i < gGameOptions.cols; i++ ) {
+		for( var j = 0; j < gGameOptions.rows; j++ ) {
+			var p = new Point(i, j);
+			// Default the square to white.
+			$("#tdGameBoard"+p.toString()).css("background-color", "white");
+			// Mark the current row/col as yellow (or lightgrey if the player is a computer).
+			if( gGame.state == "player1turn" && j == gGame.selRow ) {
+				color = "yellow";
+				if( gPlayer1.isComputer ) {
+					color = "lightgrey";
+				}
+				$("#tdGameBoard"+p.toString()).css("background-color", color);
+			}
+			else if( gGame.state == "player2turn" && i == gGame.selCol ) {
+				color = "yellow";
+				if( gPlayer2.isComputer ) {
+					color = "lightgrey";
+				}
+				$("#tdGameBoard"+p.toString()).css("background-color", color);
+			}
+			// Mark visited squares as red.
+			if( gGameBoardVisited[j][i] == true ) {
+				$("#tdGameBoard"+p.toString()).css("background-color", "red");
+			}
+		}
+	}
+}
+function updateUI() {
+	updateScoreboard();
+/*
+	resetBoardBackground();
+	if( gGame.state == "player1turn" ) {
+		$("#trGameBoard"+gGame.selRow).css("background-color", "yellow");
+	}
+	else {
+		colorCurrentColumn();
+	}
+*/
+	setBoardColors();
+}
+function isComputerTurn() {
+	return( (gGame.state == "player1turn" && gPlayer1.isComputer) ||
+			(gGame.state == "player2turn" && gPlayer2.isComputer) );
+}
+function markVisited(p) {
+	gGameBoardVisited[p.y][p.x] = true;
+	// Color the cell red to show it has already been chosen.
+	$("#tdGameBoard"+p.toString()).css("background-color", "red");
+}
+function nextPlayerTurn(val, coords) {
+	if( gGame.state == "player1turn" ) {
+		gPlayer1.lastMove = {
+			value: val,
+			coords: coords
+		};
+		return("player2turn");
+	}
+	if( gGame.state == "player2turn" ) {
+		gPlayer2.lastMove = {
+			value: val,
+			coords: coords
+		};
+		return("player1turn");
+	}
+}
+function getPositionOfMaxInCol(col) {
+	var maxPos = 0;
+	// Find the first unused square.
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		if( gGameBoardVisited[j][col] == false ) {
+			maxPos = j;
+			break;
+		}
+	}
+	// Find the largest value in the column.  We start at 'maxPos' because
+	//  we've already determined (with the previous for() loop) that all
+	//  positions above 'maxPos' in the column have already been selected.
+	for( var j = maxPos; j < gGameOptions.rows; j++ ) {
+		if( gGameBoardVisited[j][col] == false && gGameBoard[j][col] > gGameBoard[maxPos][col] ) {
+			maxPos = j;
+		}
+	}
+	return(maxPos);
+}
+function computerMove() {
+	var posOfMaxValInCurCol = getPositionOfMaxInCol(gGame.selCol);
+	// Setup the 'visited' board so that the computer can track
+	// what he is doing while he searches.
+	gMinMaxSearch.visited = new Array(gGameOptions.rows);
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		gMinMaxSearch.visited[j] = new Array(gGameOptions.cols);
+		for( var i = 0; i < gGameOptions.cols; i++ ) {
+			gMinMaxSearch.visited[j][i] = gGameBoardVisited[j][i];
+		}
+	}
+	// The current search depth the computer is at.
+	gMinMaxSearch.curSearchDepth = 0;
+	// We keep track of the scores of each player as the computer
+	// searches future moves and use them as an evaluation of 
+	// the moves (the farther ahead the computer is, the better the move).
+	gMinMaxSearch.humanScore = window[getHumanPlayer()].score;
+	gMinMaxSearch.computerScore = window[getComputerPlayer()].score;
+
+	// If 'selRow' is -1 then the computer is making the first 
+	// move of the game.
+	if( gGame.selRow == -1 ) {
+	}
+	else {
+		gMinMaxSearch.root.cell.x = gGame.selCol;
+		gMinMaxSearch.root.cell.y = gGame.selRow;
+		gMinMaxSearch.root.parent = null;
+		// Given a column to look in, the computer must choose which cell 
+		// in the column will be the best move.
+		for( var j = 0; j < gGameOptions.rows; j++ ) {
+			// If the cell has already been visited, we can't use it.
+			if( gMinMaxSearch.visited[j][gMinMaxSearch.root.cell.x] == true || j == gMinMaxSearch.root.cell.y ) {
+				gMinMaxSearch.root.children[j] = true;
+				continue;
+			}
+			var nextNode = new Node(gMinMaxSearch.root);
+			nextNode.cell.x = gMinMaxSearch.root.cell.x;
+			nextNode.cell.y = j;
+			gMinMaxSearch.computerScore += gGameBoard[nextNode.cell.y][nextNode.cell.x];
+			gMinMaxSearch.root.children[j] = minmax(nextNode, "computerturn");
+		}
+		var result = maxVal(gMinMaxSearch.root.children, gGameOptions.rows);
+
+		if( result != -1 ) {
+			maxPos = result;
+		}
+	}
+	// The computer has chosen a move, here we actually make the move.
+	window[getComputerPlayer()].score += gGameBoard[maxPos][gGame.selCol];
+	var p = new Point(gGame.selCol, maxPos)
+	markVisited(p);
+	gGame.selRow = maxPos;
+	gGame.state = nextPlayerTurn(gGameBoard[maxPos][gGame.selCol], p);
+	nextTurn();
+
+/*
+	// Set the computer's choice as selected.
+	markVisited(new Point(gGame.selCol, cj));
+	window[getComputerPlayer()].score += gGameBoard[cj][ci];
+	gGame.selRow = cj;
+	gGame.selCol = ci;
+	gGame.state = nextPlayerTurn();
+	nextTurn();
+*/
+}
+/**
+ * The evaluation function.  This functions determines the value 
+ *  of each node in the MinMax search tree.
+ */
+function evaluate() {
+	return( gMinMaxSearch.computerScore - gMinMaxSearch.humanScore );
+}
+/**
+ * Returns the array index of the smallest value in the 'arr' array.
+ */
+function minVal(arr, size) {
+	var minPos = -1;
+	var unusable = true;
+
+	for( var q = 0; q < size; q++ ) {
+		if( arr[q] != true && minPos == -1 ) {
+			unusable = false;
+			minPos = q;
+		}
+	}
+	if( unusable ) {
+		return(-1);
+	}
+
+	for( var i = 0; i < size; i++ ) {
+		if( arr[i] == true ) {
+			continue;
+		}
+		if( arr[i] < arr[minPos] ) {
+			minPos = i;
+		}
+	}
+
+	return(minPos);
+}
+/**
+ * Returns the largest value in the 'arr' array.
+ */
+function maxVal(arr, size) {
+	var maxPos = -1;
+	var unusable = true;
+
+	// Check to see if the array is filled with only ALREADYUSED values.
+	//  At the same time we set 'maxPos' to the smallest index that does
+	//  not have an ALREADYUSED value.  This way we insure that the 
+	//  'array[maxPos]' has a value at the start of the next for() loop.
+	for( var q = 0; q < size; q++ ) {
+		if( arr[q] != true && maxPos == -1 ) {
+			unusable = false;
+			maxPos = q;
+		}
+	}
+	if( unusable ) {
+		return(-1);
+	}
+
+	// Find the array position with the largest value.
+	for( var i = 0; i < size; i++ ) {
+		if( arr[i] == true ) {
+			continue;
+		}
+		if( arr[i] > arr[maxPos] ) {
+			maxPos = i;
+		}
+	}
+
+	return(maxPos);
+}
+/**
+ * This function performs a MinMax search using the 'startNode'
+ *  as the root.  It is called recursively to traverse the tree
+ *  in a depth first fashion.  When each node has had all it's
+ *  children traversed it chooses either the largest value or the
+ *  smallest value, depending on whose turn the node represents.
+ */
+function minmax(startNode, turn) {
+	var nextNode = new Node();
+	var result;
+
+	// Keep track of the depth we are currently at.
+	gMinMaxSearch.curSearchDepth++;
+	// Computer turns are MAX levels.  This section (even though it is labeled
+	// "computer turn" is where we select the human's next move.
+	if( turn == "computerturn" ) {
+		// When we've reached the "bottom" of the tree we assign that node
+		//  a value and move back up to it's parent.  The parent stores the
+		//  value of it's children.  To back up we need to undo what we did
+		//  to get to this node (so we change the score and the visited[][] array).
+		if( gMinMaxSearch.curSearchDepth == gMinMaxSearch.getMaxSearchDepth() ) {
+			gMinMaxSearch.curSearchDepth--;
+			result = evaluate();
+			gMinMaxSearch.computerScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+			gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = gGameBoardVisited[startNode.cell.y][startNode.cell.x];
+			return(result);
+		}
+		// Mark that we've been here.
+		gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = true;
+		// We iterate through all the possible moves of the human given
+		// that the computer just chose the 'startNode' position.
+		for( var x = 0; x < gGameOptions.cols; x++ ) {
+			// We don't look at cells that have already been used.
+			if( gMinMaxSearch.visited[startNode.cell.y][x] == true || x == startNode.cell.x ) {
+				startNode.children[x] = true;
+				continue;
+			}
+			nextNode.parent = startNode;
+			nextNode.cell.x = x;
+			nextNode.cell.y = startNode.cell.y;
+			gMinMaxSearch.humanScore += gGameBoard[nextNode.cell.y][nextNode.cell.x];
+			startNode.children[x] = minmax(nextNode, "humanturn");
+		}
+		// The computer has just (hypothetically) moved to the 'startNode'
+		//  position, so all of the 'startNode''s children are human moves.
+		//  Because we assume that the human will make the best move we 
+		//  choose the smallest value of the children (the value is the 
+		//  computer's score subtracted from the human's score).  So small 
+		//  values are bad for the computer and good for the human.
+		result = minVal(startNode.children, gGameOptions.rows);
+		gMinMaxSearch.computerScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+		// 'result' is the position in the '.children' array of the best
+		//  move.  If it is -1 (an impossible value for an array index)
+		//  we know something is wrong.
+		if( result == -1 ) {
+			if( gMinMaxSearch.computerScore > gMinMaxSearch.humanScore ) {
+				return(false);
+			}
+			// We reached a point where there are no more moves that can be
+			// made so we evaluate the node as if we had reached our maximum
+			// search depth.
+			gMinMaxSearch.curSearchDepth--;
+			result = evaluate();
+			gMinMaxSearch.computerScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+			gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = gGameBoardVisited[startNode.cell.y][startNode.cell.x];
+			return(result);
+//			return(true);
+		}
+	}
+	// Human turns are MIN levels.
+	else {
+		// When we've reached the "bottom" of the tree we assign that node
+		//  a value and move back up to it's parent.  The parent stores the
+		//  value of it's children.  To back up we need to undo what we did
+		//  to get to this node (so we change the score and the visited[][] array).
+		if( gMinMaxSearch.curSearchDepth == gMinMaxSearch.getMaxSearchDepth() ) {
+			gMinMaxSearch.curSearchDepth--;
+			result = evaluate();
+			gMinMaxSearch.humanScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+			gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = gGameBoardVisited[startNode.cell.y][startNode.cell.x];
+			return(result);
+		}
+		// Mark that we've been here.
+		gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = true;
+		// We iterate through all the possible moves of the computer given
+		//  that the human just chose the 'startNode' position.
+		for( var y = 0; y < gGameOptions.rows; y++ ) {
+			// We don't look at cells that have already been used.
+			if( gMinMaxSearch.visited[y][startNode.cell.x] == true || y == startNode.cell.y ) {
+				startNode.children[y] = true;
+				continue;
+			}
+			nextNode.parent = startNode;
+			nextNode.cell.x = startNode.cell.x;
+			nextNode.cell.y = y;
+			gMinMaxSearch.computerScore += gGameBoard[nextNode.cell.y][nextNode.cell.x];
+			startNode.children[y] = minmax(nextNode, "computerturn");
+		}
+		// Same as above, just in reverse.  Thus we find the largest value
+		//  in the '.children' array.
+		result = maxVal(startNode.children, gGameOptions.rows);
+		gMinMaxSearch.humanScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+		if( result == -1 ) {
+			// We reached a point where there are no more moves that can be
+			// made so we evaluate the node as if we had reached our maximum
+			// search depth.
+			gMinMaxSearch.curSearchDepth--;
+			result = evaluate();
+			gMinMaxSearch.humanScore -= gGameBoard[startNode.cell.y][startNode.cell.x];
+			gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = gGameBoardVisited[startNode.cell.y][startNode.cell.x];
+			return(result);
+//			return(true);
+		}
+	}
+	gMinMaxSearch.visited[startNode.cell.y][startNode.cell.x] = gGameBoard[startNode.cell.y][startNode.cell.x];
+	gMinMaxSearch.curSearchDepth--;
+	return(startNode.children[result]);
+}
+function rowCompletelyUsed() {
+	if( gGame.selRow == -1 ) {
+		return(false);
+	}
+	for( var i = 0; i < gGameOptions.cols; i++ ) {
+		if( gGameBoardVisited[gGame.selRow][i] == false ) {
+			return(false);
+		}
+	}
+	return(true);
+}
+function columnCompletelyUsed() {
+	if( gGame.selCol == -1 ) {
+		return(false);
+	}
+	for( var j = 0; j < gGameOptions.rows; j++ ) {
+		if( gGameBoardVisited[j][gGame.selCol] == false ) {
+			return(false);
+		}
+	}
+	return(true);
+}
+function validMoveExists() {
+	if( gGame.state == "player1turn" ) {
+		return( !rowCompletelyUsed() );
+	}
+	return( !columnCompletelyUsed() );
+}
+function gameOver() {
+	var gameOverMsg = "Game Over!";
+	if( gGameOptions.keepWL ) {
+		var key = "wl"+gPlayer1.name+":"+gPlayer2.name;
+		var wl = localStorage.getItem(key);
+		// If the key is not found (wl == null) then we create it.  Othwerwise
+		// we update the existing win/loss record and re-store it.
+		if( wl == null ) {
+			wl = "1-0";
+			if( gPlayer2.score > gPlayer1.score ) {
+				wl = "0-1";
+			}
+		}
+		else {
+			wl = wl.split("-");
+			if( gPlayer1.score > gPlayer2.score ) {
+				wl[0]++;
+			}
+			else {
+				wl[1]++;
+			}
+			wl = wl.join("-");
+		}
+		localStorage.setItem(key, wl);
+		// Add the record to the game over message.
+		wl = wl.split("-");
+		gameOverMsg += "\n\nWins:\n"+gPlayer1.name+": "+wl[0]+"\n"+gPlayer2.name+": "+wl[1];
+	}
+	alert(gameOverMsg);
+}
+function nextTurn() {
+	updateUI();
+	if( !validMoveExists() ) {
+		gameOver();
+		return;
+	}
+	// If it is the computer's turn to go, then set the computer to thinking.
+	if( isComputerTurn() ) {
+		// Wait half a second to let the browser's UI update.
+		setTimeout("computerMove()", 500);
+	}
+}
+function clearMsg() {
+	$("#divInfobar").hide();
+}
+function showMsg(msg, type, showLen) {
+	// Clear styling.  The proper one will get added back later.
+	$("#divInfobar > DIV").removeClass("ui-state-hightlight").removeClass("ui-state-error");
+	// Set default values for the function arguments.
+	if( !showLen ) {
+		showLen = gGameOptions.showMessageLength;
+	}
+	if( !type ) {
+		type = "info";
+	}
+	// Create the icon and state class we will use.
+	iconhtml = "";
+	stateclass = "ui-state-highlight";
+	switch( type ) {
+	case "error":
+		iconhtml = "alert";
+		stateclass = "ui-state-error";
+		break;
+	case "info":
+	default:
+		iconhtml = "info";
+		break;
+	}
+	iconhtml = "<span class=\"ui-icon ui-icon-"+iconhtml+"\" style=\"float: left; margin-right: 0.5em;\"></span>"
+	
+	$("#divInfobar > DIV").addClass(stateclass).html(iconhtml+msg);
+//	$("#divInfobar").center("horizontal");
+	$("#divInfobar").css({
+		position: "absolute",
+		top: "10px",
+		left: $("#tdProgramName").offset().left+($("#tdProgramName").width()/2)
+	});
+	$("#divInfobar").show();
+	if( showLen > 0 ) {
+		setTimeout("clearMsg()", showLen*1000);
+	}
+}
+function getHumanPlayer() {
+	// If the opponent is a computer then we simply return the player which is
+	// not a computer player.
+	if( gGameOptions.opponent == "computer" ) {
+		if( !gPlayer1.isComputer ) {
+			return("gPlayer1");
+		}
+		return("gPlayer2");
+	}
+	// If the opponent is a human then we return the player whose turn it 
+	// currently is.
+	else {
+		switch( gGame.state ) {
+		case "player1turn":
+			return("gPlayer1");
+		case "player2turn":
+			return("gPlayer2");
+		default:
+			return(null);
+		}
+	}
+}
+function getComputerPlayer() {
+	if( gPlayer1.isComputer ) {
+		return("gPlayer1");
+	}
+	return("gPlayer2");
+}
+function showOptions() {
+	// Open so we can get an actual width and then resize the 
+	// dialog to that width.
+	$("#dlgOptions").dialog("open");
+	$("#dlgOptions").dialog("option", "width", $("#tableOptions").outerWidth()+100);
+	// Close and open to re-center.
+	$("#dlgOptions").dialog("close");
+	$("#dlgOptions").dialog("open");
+	// Set the options to their current values.
+	$("#options_board_size").val(gGameOptions.rows);
+	$("#options_computer_level").val(gGameOptions.computerLevel);
+}
+function showHelp() {
+	$("#dlgHelp").dialog("open");
+}
+function changePlayerName(e) {
+	window[e.data.player].name = prompt("Enter the player's new name:");
+	updateUI();
+}
+function browser_supports_html5_storage() {
+	try {
+		if( 'localStorage' in window && window['localStorage'] != null ) {
+			return(true);
+		}
+		return(false);
+	} catch (e) {
+		return(false);
+	}
+}
+function saveGameOptions() {
+	gGameOptions.rows = gGameOptions.cols = parseInt($("#options_board_size").val());
+	gGameOptions.computerLevel = parseInt($("#options_computer_level").val());
+	gGameOptions.opponent = $("#options_opponent").val();
+	gGameOptions.keepWL = $("#options_keepwl").is(":checked") ? "1" : "0";
+	if( browser_supports_html5_storage() ) {
+		try {
+			// If the checkbox is checked we save the options, otherwise we clear the options.
+			if( $("#options_save").is(":checked") ) {
+				window.localStorage.setItem("size", gGameOptions.rows);
+				window.localStorage.setItem("computerLevel", gGameOptions.computerLevel);
+				window.localStorage.setItem("opponent", gGameOptions.opponent);
+				window.localStorage.setItem("keepWL", gGameOptions.keepWL);
+				window.localStorage.setItem("saved", "1");
+			}
+			else {
+				window.localStorage.clear();
+			}
+		}
+		catch( err ) {
+			// IE8 gives us an object, other browsers give us a string.
+			if( err.message ) {
+				err = err.message;
+			}
+			showMsg("Error saving options: "+err, "error", 10);
+		}
+	}
+	else {
+		// Save using cookies.
+		var cookie_expire_date = new Date();
+		var cookie_value = "";
+		// If the checkbox is checked we save the options, otherwise we clear the options.
+		if( $("#options_save").is(":checked") ) {
+			cookie_expire_date.setDate(cookie_expire_date.getDate() + 100000);
+			cookie_value = "saved=1&size="+gGameOptions.rows+"&computerLevel="+gGameOptions.computerLevel+"&opponent="+gGameOptions.opponent;
+		}
+		else {
+			cookie_expire_date.setDate(cookie_expire_date.getDate() - 100);
+			cookie_value = "";
+		}
+		var c_val = gCookieName+"="+escape(cookie_value)+";expires="+cookie_expire_date.toUTCString();
+		document.cookie = c_val;
+	}
+}
+function loadOptions() {
+	var saved = 0;
+	if( browser_supports_html5_storage() ) {
+		try {
+			// Only attempt to load saved options if the "saved" value is set to one.
+			saved = localStorage.getItem("saved");
+			if( saved == null ) {
+				saved = 0;
+			}
+			else if( saved == "1" ) {
+				gGameOptions.rows = gGameOptions.cols = parseInt(localStorage.getItem("size"));
+				gGameOptions.computerLevel = parseInt(localStorage.getItem("computerLevel"));
+				gGameOptions.opponent = localStorage.getItem("opponent");
+				gGameOptions.keepWL = localStorage.getItem("keepWL");
+			}
+		} catch( err ) {
+			showMsg("Error loading saved options: "+err, "error", 10);
+		}
+	}
+	else {
+		// Load from cookie.
+		var cookies = document.cookie.split(";");
+		for( var i = 0; i < cookies.length; i++ ) {
+			var nv = cookies[i].split("=");
+			if( nv[0] == gCookieName ) {
+				var arr = unescape(nv[1]).split("&");
+				for( var a = 0; a < arr.length; a++ ) {
+					nv = arr[a].split("=");
+					switch( nv[0] ) {
+					case "saved":
+						saved = 1;
+						break;
+					case "size":
+						gGameOptions.rows = gGameOptions.cols = nv[1];
+						break;
+					case "computerLevel":
+						gGameOptions.computerLevel = nv[1];
+						break;
+					case "opponent":
+						gGameOptions.opponent = nv[1];
+						break;
+					}
+				}
+			}
+		}
+	}
+	$("#options_save").attr("checked", saved == 1);
+	$("#options_keepwl").attr("checked", gGameOptions.keepWL == 1);
+	$("#options_board_size").val(gGameOptions.rows);
+	$("#options_computer_level").val(gGameOptions.computerLevel);
+	$("#options_opponent").val(gGameOptions.opponent);
+}
+
+
+function createEventHandlers() {
+	$("#btnNewGame").click(newGame);
+	$("#btnOptions").click(showOptions);
+	$("#btnHelp").click(showHelp);
+	$("#spanPlayer1Name").click({ player: "gPlayer1" }, changePlayerName);
+	$("#spanPlayer2Name").click({ player: "gPlayer2" }, changePlayerName);
+	$("TD[id^=tdGameBoard]").live("click", function() {
+		// If it is the computers turn then we ignore the click.
+		if( isComputerTurn() ) {
+			return;
+		}
+		// Get the coordinates of the selected cell.
+		var p = (new Point()).fromString($(this).attr("id").substring(11));
+		// If the cell has already been chosen then we ignore the click.
+		if( gGameBoardVisited[p.y][p.x] == true ) {
+			showMsg("That square has already been selected.  Please choose a different square on the highlighted row.", "error", 5);
+			return;
+		}
+		// Allow player1 to only select cells in the current row.  If this is 
+		// the first move of the game (where gGame.selRow == -1) then the 
+		// player can select any row they want.
+		if( gGame.state == "player1turn" && p.y != gGame.selRow && gGame.selRow != -1 ) {
+			showMsg("Only numbers in the highlighted row can be selected.", "error", 5);
+			return;
+		}
+		// Allow player2 to only select cells in the current column.
+		if( gGame.state == "player2turn" && p.x != gGame.selCol && gGame.selCol != -1 ) {
+			showMsg("Only numbers in the highlighted column can be selected.", "error", 5);
+			return;
+		}
+		// Mark the cell as having already been chosen.
+		markVisited(p);
+		// Add the value of the cell to the human's score.
+		window[getHumanPlayer()].score += gGameBoard[p.y][p.x];
+		// Set the state of the game.
+		gGame.selRow = p.y;
+		gGame.selCol = p.x;
+		gGame.state = nextPlayerTurn(gGameBoard[p.y][p.x], p);
+		// Move to the next player.
+		nextTurn();
+	});
+}
+$(document).ready(function() {
+	document.title = gProgramName+" v"+gProgramVersion+" by "+gProgramAuthor;
+	$("#tdProgramName").html(gProgramName+" v"+gProgramVersion);
+	createEventHandlers();
+	$("#btnNewGame").button();
+	$("#btnOptions").button();
+	$("#btnHelp").button();
+	$("#dlgOptions").dialog({
+		autoOpen: false,
+		modal: true,
+		resizable: false,
+		title: "Options",
+		position: gDialogPosition,
+		buttons: [
+			{
+				text: "Done",
+				click: function() {
+					saveGameOptions();
+					$(this).dialog("close");
+				}
+			}
+		]
+	});
+	$("#dlgHelp").dialog({
+		autoOpen: false,
+		modal: true,
+		resizable: false,
+		title: "Help",
+		width: Math.ceil($(window).width()*0.5),
+		height: Math.ceil($(window).height()*0.67),
+		position: gDialogPosition,
+		buttons: [
+			{
+				text: "Ok",
+				click: function() {
+					gGameOptions.rows = gGameOptions.cols = parseInt($("#options_board_size").val());
+					gGameOptions.computerLevel = parseInt($("#options_computer_level").val());
+					$(this).dialog("close");
+				}
+			}
+		],
+		open: function(event, ui) {
+			$("#dlgHelp_ProgramName").html("<A href=\""+gProgramURL+"\">"+gProgramName+"</A> v"+gProgramVersion);
+			$("#dlgHelp_ProgramAuthor").html(gProgramAuthor);
+		}
+	});
+	loadOptions();
+	$("BODY").show();
+	showMsg("Click the \"New Game\" button to start a new game.", "info", 10);
+});
+</SCRIPT>
+<STYLE type="text/css">
+BODY {
+	margin: 0px;
+	padding: 0px;
+	background-color: white;
+}
+TD[id^=tdGameBoard] {
+	height: 30px;
+}
+TD[id^=tdPlayer] {
+	text-align: center;
+}
+SPAN[id$=LastMove] {
+	width: 100%;
+	text-align: center;
+	font-size: 10pt;
+}
+DIV[id^=dlg] {
+	display: none;
+	white-space: nowrap;
+}
+DIV#dlgHelp P {
+	text-indent: 15pt;
+	white-space: pre-wrap;
+}
+DIV#dlgHelp #dlgHelp_ProgramName {
+	font-size: 28pt;
+	font-weight: bold;
+}
+#tdTitlebarButtons {
+	text-align: right;
+	padding-right: 5px;
+}
+#tdProgramName {
+	text-align: left;
+	padding-left: 15px;
+	font-size: 24pt;
+	font-weight: bold;
+}
+#tableTitlebar {
+	padding-top: 5px;
+}
+#divInfobar {
+	position: absolute;
+	top: 15px;
+	z-index: 3;
+	align: center;
+	text-align: center;
+	font-size: 12pt;
+	color: maroon;
+}
+#divInfobar > DIV {
+	padding: 0.3em 0.7em;
+}
+#tableGameBoard {
+	text-align: center;
+	cursor: pointer;
+	table-layout: fixed;
+}
+#tableScoreboard {
+	height: 75px;
+	font-weight: bold;
+	font-size: 18pt;
+}
+#spanPlayer1Name, #spanPlayer2Name {
+	cursor: pointer;
+}
+</STYLE>
+</HEAD>
+<BODY style="display: none;">
+
+<DIV id="divTitlebar">
+<TABLE width="100%" border="0" id="tableTitlebar">
+<TR>
+<TD width="50%" id="tdProgramName"></TD>
+<TD width="50%" id="tdTitlebarButtons">
+<INPUT type="button" id="btnNewGame" value="New Game">
+<INPUT type="button" id="btnOptions" value="Options">
+<INPUT type="button" id="btnHelp" value=" ? ">
+</TD>
+</TR>
+</TABLE>
+<HR width="100%" noshade>
+</DIV>
+
+<DIV class="ui-widget" id="divInfobar">
+<DIV class="ui-state-highlight ui-corner-all"></DIV>
+</DIV>
+
+<TABLE align="center" rules="all" border="1" cellpadding="3" cellspacing="3" id="tableGameBoard">
+</TABLE>
+
+<HR width="100%" noshade>
+
+<TABLE width="100%" border="0" id="tableScoreboard">
+<TR>
+<TD id="tdPlayer1">
+<SPAN id="spanPlayer1Name"></SPAN> &nbsp;
+<SPAN id="spanPlayer1Score"></SPAN><BR>
+<SPAN id="spanPlayer1LastMove"></SPAN>
+</TD>
+<TD id="tdPlayer2">
+<SPAN id="spanPlayer2Name"></SPAN> &nbsp;  
+<SPAN id="spanPlayer2Score"></SPAN><BR>
+<SPAN id="spanPlayer2LastMove"></SPAN>
+</TD>
+</TR>
+</TABLE>
+
+<DIV id="dlgOptions">
+<TABLE border="0" style="white-space: nowrap;" id="tableOptions">
+<TR>
+<TD><STRONG>Board Size:</STRONG></TD>
+<TD>
+<SELECT id="options_board_size">
+<OPTION value="15">15x15</OPTION>
+<OPTION value="10">10x10</OPTION>
+<OPTION value="7">7x7</OPTION>
+<OPTION value="5">5x5</OPTION>
+</SELECT>
+</TD>
+</TR>
+<TR>
+<TD><STRONG>Computer Difficulty:</STRONG></TD>
+<TD>
+<SELECT id="options_computer_level">
+<OPTION value="0">Predicable (Easy)</OPTION>
+<OPTION value="1">Moderate</OPTION>
+<OPTION value="2">Hard</OPTION>
+<OPTION value="3" disabled>Difficult (requires server)</OPTION>
+<OPTION value="4" disabled>Insane (requires server)</OPTION>
+<OPTION value="5" disabled>Foresight (requires server)</OPTION>
+<OPTION value="6" disabled>Omniscient (requires server)</OPTION>
+</SELECT>
+</TD>
+</TR>
+<TR>
+<TD><STRONG>Opponent:</STRONG></TD>
+<TD>
+<SELECT id="options_opponent">
+<OPTION value="computer">Computer</OPTION>
+<OPTION value="human">Human</OPTION>
+<!-- <OPTION value="remote_human">Remote Human</OPTION> -->
+</SELECT>
+</TD>
+</TR>
+<TR>
+<TD><STRONG>Keep Score:</STRONG></TD>
+<TD>
+<INPUT type="checkbox" id="options_keepwl" value="1">
+</TD>
+</TR>
+<TR>
+<TD><STRONG>Save Options:</STRONG></TD>
+<TD>
+<INPUT type="checkbox" id="options_save" value="1">
+</TD>
+</TR>
+</TABLE>
+</DIV>
+
+<DIV id="dlgHelp">
+<SPAN id="dlgHelp_ProgramName"></SPAN><BR>
+&copy; 2011 <SPAN id="dlgHelp_ProgramAuthor"></SPAN>
+<HR align="left" width="50%">
+<STRONG>Objective</STRONG>
+<P>To finish the game with the highest number.</P>
+<STRONG>Rules</STRONG>
+<P>Player 1 goes first and may choose any square on the board.  After that, Player 2 must choose a square that is in the same column as the last square chosen by Player 1.  Similarly, except for the first move, Player 1 may only choose squares that are in the same row as the last square chosen by Player 2.</P>
+<STRONG>How To Play</STRONG>
+<P>Click the "New Game" button to start a new game.  <SPAN style="color: red; background-color: black;">Red</SPAN> squares have already been played and cannot be used.  Each turn the squares the player can choose from are shown in <SPAN style="color: yellow; background-color: black;">yellow</SPAN>.</P>
+<P>The "Options" button shows a dialog where game options can be adjusted.</P>
+<P>The names of the players can be changed during a game by clicking that player's name.</P>
+</DIV>
+
+
+<BR>
+<A href="http://sourceforge.net/projects/max-it"><IMG src="http://sflogo.sourceforge.net/sflogo.php?group_id=231710&amp;type=8" width="80" height="15" border="0" alt="Get Max-It at SourceForge.net. Fast, secure and Free Open Source software downloads"/></A>
+
+<!-- Piwik --> 
+<script type="text/javascript">
+var pkBaseURL = (("https:" == document.location.protocol) ? "https://sourceforge.net/userapps/piwik/shadybrooksoft/" : "http://sourceforge.net/userapps/piwik/shadybrooksoft/");
+document.write(unescape("%3Cscript src='" + pkBaseURL + "piwik.js' type='text/javascript'%3E%3C/script%3E"));
+</script><script type="text/javascript">
+try {
+var piwikTracker = Piwik.getTracker(pkBaseURL + "piwik.php", 1);
+piwikTracker.trackPageView();
+piwikTracker.enableLinkTracking();
+} catch( err ) {}
+</script><noscript><p><img src="http://sourceforge.net/userapps/piwik/shadybrooksoft/piwik.php?idsite=1" style="border:0" alt=""/></p></noscript>
+<!-- End Piwik Tag -->
+
+
+</BODY>
+</HTML>
